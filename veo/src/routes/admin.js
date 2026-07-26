@@ -3,10 +3,12 @@
 /**
  * routes/admin.js
  *
- * Express routes for the Admin Control Panel & Cookie Sync functionality.
+ * Express routes for the Admin Control Panel, Cookie Sync, and Reverse Proxy.
  */
 
 const { Router } = require("express");
+const https = require("https");
+const { URL } = require("url");
 const { db } = require("../services/firestore");
 const { launchFlow } = require("../services/flow");
 const { syncAll, syncUncodee, syncFlowbunny } = require("../services/sync");
@@ -22,6 +24,62 @@ router.get("/flow", async (req, res) => {
     res.send(result.html);
   } catch (err) {
     res.status(500).send(`<h2>Flow error</h2><pre>${err.message}</pre>`);
+  }
+});
+
+// ── Reverse Proxy for /fx/* (Bypasses CORS & proxies authenticated API requests) ──
+router.use("/fx*", async (req, res) => {
+  try {
+    const snap = await db.collection("pool_cookies").where("is_active", "==", true).get();
+    const cookieHeader = snap.docs
+      .map((d) => `${d.data().cookie_name}=${d.data().cookie_value}`)
+      .join("; ");
+
+    const targetUrl = new URL(req.originalUrl, "https://labs.google");
+
+    const reqHeaders = { ...req.headers };
+    delete reqHeaders.host;
+    delete reqHeaders.connection;
+    reqHeaders["host"] = "labs.google";
+    reqHeaders["origin"] = "https://labs.google";
+    reqHeaders["referer"] = "https://labs.google/fx/tools/flow";
+    if (cookieHeader) {
+      reqHeaders["cookie"] = cookieHeader;
+    }
+
+    const proxyReq = https.request(
+      targetUrl,
+      {
+        method: req.method,
+        headers: reqHeaders,
+      },
+      (proxyRes) => {
+        res.status(proxyRes.statusCode);
+        for (const [key, value] of Object.entries(proxyRes.headers)) {
+          if (key.toLowerCase() !== "content-security-policy") {
+            res.setHeader(key, value);
+          }
+        }
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Allow-Credentials", "true");
+        res.setHeader("Access-Control-Allow-Headers", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
+        proxyRes.pipe(res);
+      }
+    );
+
+    proxyReq.on("error", (err) => {
+      console.error("[Proxy Error]", err.message);
+      if (!res.headersSent) res.status(502).json({ error: err.message });
+    });
+
+    if (["POST", "PUT", "PATCH"].includes(req.method)) {
+      req.pipe(proxyReq);
+    } else {
+      proxyReq.end();
+    }
+  } catch (err) {
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
 
