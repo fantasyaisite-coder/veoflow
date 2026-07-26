@@ -3,11 +3,12 @@
 /**
  * routes/admin.js
  *
- * Express routes for the Admin Control Panel, Cookie Sync, and Reverse Proxy.
+ * Express routes for the Admin Control Panel, Cookie Sync, and Universal Proxy.
  */
 
 const { Router } = require("express");
 const https = require("https");
+const http = require("http");
 const { URL } = require("url");
 const { db } = require("../services/firestore");
 const { launchFlow } = require("../services/flow");
@@ -27,27 +28,36 @@ router.get("/flow", async (req, res) => {
   }
 });
 
-// ── Reverse Proxy for /fx/* (Bypasses CORS & proxies authenticated API requests) ──
-router.use("/fx*", async (req, res) => {
+// ── Universal Proxy for all labs.google & googleapis API calls ──────────────
+async function handleProxy(req, res) {
   try {
+    let targetUrlStr = req.query.url;
+    if (!targetUrlStr) {
+      if (req.originalUrl.startsWith("/fx")) {
+        targetUrlStr = "https://labs.google" + req.originalUrl;
+      } else {
+        return res.status(400).json({ error: "Missing target URL" });
+      }
+    }
+
+    const targetUrl = new URL(targetUrlStr);
     const snap = await db.collection("pool_cookies").where("is_active", "==", true).get();
     const cookieHeader = snap.docs
       .map((d) => `${d.data().cookie_name}=${d.data().cookie_value}`)
       .join("; ");
 
-    const targetUrl = new URL(req.originalUrl, "https://labs.google");
-
     const reqHeaders = { ...req.headers };
     delete reqHeaders.host;
     delete reqHeaders.connection;
-    reqHeaders["host"] = "labs.google";
+    reqHeaders["host"] = targetUrl.host;
     reqHeaders["origin"] = "https://labs.google";
     reqHeaders["referer"] = "https://labs.google/fx/tools/flow";
     if (cookieHeader) {
       reqHeaders["cookie"] = cookieHeader;
     }
 
-    const proxyReq = https.request(
+    const client = targetUrl.protocol === "https:" ? https : http;
+    const proxyReq = client.request(
       targetUrl,
       {
         method: req.method,
@@ -81,7 +91,10 @@ router.use("/fx*", async (req, res) => {
   } catch (err) {
     if (!res.headersSent) res.status(500).json({ error: err.message });
   }
-});
+}
+
+router.use("/proxy", handleProxy);
+router.use("/fx*", handleProxy);
 
 // ── Admin API ──────────────────────────────────────────────
 router.post("/api/login", async (req, res) => {
