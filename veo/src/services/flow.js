@@ -9,7 +9,7 @@
  * 3. Clear default cookies via CDP.
  * 4. Inject Firestore pool cookies via CDP.
  * 5. Reload page to apply authenticated session cookies.
- * 6. Capture full HTML & inject reverse-proxy fetch/XHR patch script.
+ * 6. Capture full HTML & inject universal proxy patch script.
  */
 
 const { db } = require("./firestore");
@@ -135,10 +135,23 @@ async function launchFlow() {
   // Step 6: Capture final HTML content
   let html = await page.content();
 
-  // Inject History API patch and proxy script for fetch/XHR
+  // Inject History API patch and Universal /proxy URL rewriter script
   const patchScript = `
 <script>
 (function() {
+  function rewrite(u) {
+    if (!u) return u;
+    var s = typeof u === 'string' ? u : (u.href || u.url || u.toString());
+    if (!s || s.indexOf('/proxy') === 0) return u;
+    if (s.indexOf('labs.google') !== -1 || s.indexOf('googleapis.com') !== -1) {
+      return '/proxy?url=' + encodeURIComponent(s.startsWith('/') ? 'https://labs.google' + s : s);
+    }
+    if (s.indexOf('/fx/') === 0 || s.indexOf('/api/') === 0) {
+      return '/proxy?url=' + encodeURIComponent('https://labs.google' + s);
+    }
+    return u;
+  }
+
   // 1. History patch
   var _r = window.history.replaceState;
   var _p = window.history.pushState;
@@ -159,36 +172,22 @@ async function launchFlow() {
     } catch(e) {}
   };
 
-  // 2. Fetch patch to route all labs.google API requests through server /fx proxy
+  // 2. Universal fetch proxy rewriter
   var _origFetch = window.fetch;
-  window.fetch = function(resource, init) {
-    var urlStr = typeof resource === 'string' ? resource : (resource && resource.url ? resource.url : '');
-    if (urlStr) {
-      if (urlStr.indexOf('https://labs.google/fx') === 0) {
-        urlStr = urlStr.replace('https://labs.google/fx', '/fx');
-      } else if (urlStr.indexOf('https://labs.google') === 0) {
-        urlStr = urlStr.replace('https://labs.google', '/fx');
-      }
-      if (typeof resource === 'string') {
-        resource = urlStr;
-      } else if (resource && resource.url) {
-        resource = new Request(urlStr, resource);
-      }
+  window.fetch = function(input, init) {
+    if (typeof input === 'string') {
+      input = rewrite(input);
+    } else if (input && input.url) {
+      var newUrl = rewrite(input.url);
+      input = new Request(newUrl, input);
     }
-    return _origFetch.call(this, resource, init);
+    return _origFetch.call(this, input, init);
   };
 
-  // 3. XMLHttpRequest patch
+  // 3. Universal XMLHttpRequest proxy rewriter
   var _origOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url, async, user, pass) {
-    if (typeof url === 'string') {
-      if (url.indexOf('https://labs.google/fx') === 0) {
-        url = url.replace('https://labs.google/fx', '/fx');
-      } else if (url.indexOf('https://labs.google') === 0) {
-        url = url.replace('https://labs.google', '/fx');
-      }
-    }
-    return _origOpen.call(this, method, url, async, user, pass);
+    return _origOpen.call(this, method, rewrite(url), async, user, pass);
   };
 })();
 </script>
