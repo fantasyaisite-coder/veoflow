@@ -3,7 +3,7 @@
 /**
  * services/flow.js
  *
- * Launches Google Flow page with CDP raw cookie injection using active pool cookies.
+ * Fast Google Flow launcher with optimized page loading and CDP raw cookie injection.
  */
 
 const { db } = require("./firestore");
@@ -63,6 +63,7 @@ async function getBrowserInstance() {
       "--disable-sync",
       "--disable-default-apps",
       "--disable-extensions",
+      "--blink-settings=imagesEnabled=true",
     ],
   };
 
@@ -77,6 +78,13 @@ async function getBrowserInstance() {
 async function launchFlow() {
   const b = await getBrowserInstance();
   const page = await b.newPage();
+
+  // Set standard User-Agent and Viewport so Google Labs doesn't hang or redirect to legacy browser checks
+  await page.setViewport({ width: 1440, height: 900 });
+  await page.setUserAgent(
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+  );
+
   const cdp = await page.target().createCDPSession();
 
   // Inject cookies via raw CDP
@@ -100,8 +108,16 @@ async function launchFlow() {
   }
 
   const targetUrl = config.adminDefinedUrl || "https://labs.google/fx/tools/flow";
-  await page.goto(targetUrl, { waitUntil: "load", timeout: 90000 });
-  await page.evaluate(() => new Promise((r) => setTimeout(r, 3000)));
+  
+  // Use domcontentloaded + fast 30s timeout so page loads in seconds instead of waiting 90s for background streams
+  try {
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+  } catch (navErr) {
+    console.warn(`[Flow] Initial navigation warning: ${navErr.message}, proceeding to capture HTML snapshot...`);
+  }
+
+  // Short 1-second pause to let core DOM hydrate
+  await new Promise((r) => setTimeout(r, 1000));
   let html = await page.content();
   
   // Inject <base> so relative URLs load from labs.google
