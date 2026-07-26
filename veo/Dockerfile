@@ -37,11 +37,15 @@ ENV PORT=3000 \
     NODE_ENV=production \
     CHROME_EXECUTABLE=/usr/bin/google-chrome
 
+# Limit Node heap to 256 MB to avoid OOM on low-memory hosts (Render Starter)
+ENV NODE_OPTIONS="--max-old-space-size=256"
+
 # Expose the service port
 EXPOSE 3000
 
 # Health-check: lightweight ping to the /health endpoint
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-  CMD curl -f http://localhost:3000/health || exit 1
+# Uses $PORT so it works regardless of Render's port override
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD curl -f http://localhost:${PORT}/health || exit 1
 
 CMD ["node", "src/index.js"]
