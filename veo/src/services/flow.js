@@ -3,7 +3,7 @@
 /**
  * services/flow.js
  *
- * Fast Google Flow launcher with CDP raw cookie injection and cross-origin history patch.
+ * Fast Google Flow launcher with CDP cookie clearing, cookie injection, and instant commit navigation.
  */
 
 const { db } = require("./firestore");
@@ -50,7 +50,7 @@ async function getBrowserInstance() {
   if (browser && browser.isConnected()) return browser;
   
   const executablePath = resolveChromeExecutable();
-  console.info(`[Flow] Launching Chrome executable: ${executablePath || "(bundled default)"}`);
+  console.info(`[Flow] Launching warm Chrome instance: ${executablePath || "(bundled default)"}`);
 
   const launchOptions = {
     headless: "new",
@@ -63,7 +63,6 @@ async function getBrowserInstance() {
       "--disable-sync",
       "--disable-default-apps",
       "--disable-extensions",
-      "--blink-settings=imagesEnabled=true",
     ],
   };
 
@@ -86,10 +85,14 @@ async function launchFlow() {
 
   const cdp = await page.target().createCDPSession();
 
-  // Inject cookies via raw CDP
+  // 1. Clear any default / leftover cookies
+  await cdp.send("Network.clearBrowserCookies").catch(() => {});
+
+  // 2. Retrieve active pool cookies from Firestore
   const snap = await db.collection("pool_cookies").where("is_active", "==", true).get();
   if (snap.empty) throw new Error("No active pool cookies found in Firestore");
 
+  // 3. Inject pool cookies into CDP
   for (const d of snap.docs) {
     const c = d.data();
     const params = {
@@ -108,17 +111,15 @@ async function launchFlow() {
 
   const targetUrl = config.adminDefinedUrl || "https://labs.google/fx/tools/flow";
   
-  try {
-    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
-  } catch (navErr) {
-    console.warn(`[Flow] Navigation info: ${navErr.message}`);
-  }
+  // 4. Instant navigation: "commit" phase (loads headers instantly without waiting)
+  await page.goto(targetUrl, { waitUntil: "commit", timeout: 15000 }).catch((navErr) => {
+    console.warn(`[Flow] Commit navigation info: ${navErr.message}`);
+  });
 
-  // Wait 3 seconds to let React/Next.js hydrate and render components
-  await new Promise((r) => setTimeout(r, 3000));
+  // 5. Get HTML content immediately (no artificial delay)
   let html = await page.content();
   
-  // Inject History API patch and <base href> to eliminate client-side SecurityErrors and fix relative links
+  // 6. Inject client-side History patch script & <base href> tag
   const patchScript = `
 <script>
 (function() {
@@ -130,7 +131,7 @@ async function launchFlow() {
         try { url = new URL(url).pathname + new URL(url).search; } catch(e) { url = '/'; }
       }
       return _r.call(this, state, title, url);
-    } catch(e) { console.warn('[History Patch] replaceState suppressed:', e); }
+    } catch(e) {}
   };
   window.history.pushState = function(state, title, url) {
     try {
@@ -138,7 +139,7 @@ async function launchFlow() {
         try { url = new URL(url).pathname + new URL(url).search; } catch(e) { url = '/'; }
       }
       return _p.call(this, state, title, url);
-    } catch(e) { console.warn('[History Patch] pushState suppressed:', e); }
+    } catch(e) {}
   };
 })();
 </script>
