@@ -1,0 +1,12 @@
+{
+  "name": "cookie-pool-server",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "express": "^4.18.0",
+    "firebase": "^10.14.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}
