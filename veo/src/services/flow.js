@@ -3,7 +3,7 @@
 /**
  * services/flow.js
  *
- * Fast Google Flow launcher with optimized page loading and CDP raw cookie injection.
+ * Fast Google Flow launcher with CDP raw cookie injection and cross-origin history patch.
  */
 
 const { db } = require("./firestore");
@@ -79,7 +79,6 @@ async function launchFlow() {
   const b = await getBrowserInstance();
   const page = await b.newPage();
 
-  // Set standard User-Agent and Viewport so Google Labs doesn't hang or redirect to legacy browser checks
   await page.setViewport({ width: 1440, height: 900 });
   await page.setUserAgent(
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
@@ -109,19 +108,43 @@ async function launchFlow() {
 
   const targetUrl = config.adminDefinedUrl || "https://labs.google/fx/tools/flow";
   
-  // Use domcontentloaded + fast 30s timeout so page loads in seconds instead of waiting 90s for background streams
   try {
-    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
   } catch (navErr) {
-    console.warn(`[Flow] Initial navigation warning: ${navErr.message}, proceeding to capture HTML snapshot...`);
+    console.warn(`[Flow] Navigation info: ${navErr.message}`);
   }
 
-  // Short 1-second pause to let core DOM hydrate
-  await new Promise((r) => setTimeout(r, 1000));
+  // Wait 3 seconds to let React/Next.js hydrate and render components
+  await new Promise((r) => setTimeout(r, 3000));
   let html = await page.content();
   
-  // Inject <base> so relative URLs load from labs.google
-  html = html.replace("<head>", '<head><base href="https://labs.google/">');
+  // Inject History API patch and <base href> to eliminate client-side SecurityErrors and fix relative links
+  const patchScript = `
+<script>
+(function() {
+  var _r = window.history.replaceState;
+  var _p = window.history.pushState;
+  window.history.replaceState = function(state, title, url) {
+    try {
+      if (url && typeof url === 'string' && (url.indexOf('labs.google') !== -1)) {
+        try { url = new URL(url).pathname + new URL(url).search; } catch(e) { url = '/'; }
+      }
+      return _r.call(this, state, title, url);
+    } catch(e) { console.warn('[History Patch] replaceState suppressed:', e); }
+  };
+  window.history.pushState = function(state, title, url) {
+    try {
+      if (url && typeof url === 'string' && (url.indexOf('labs.google') !== -1)) {
+        try { url = new URL(url).pathname + new URL(url).search; } catch(e) { url = '/'; }
+      }
+      return _p.call(this, state, title, url);
+    } catch(e) { console.warn('[History Patch] pushState suppressed:', e); }
+  };
+})();
+</script>
+`;
+
+  html = html.replace("<head>", `<head><base href="https://labs.google/">${patchScript}`);
   await page.close();
   return { ok: true, html, count: snap.size };
 }
