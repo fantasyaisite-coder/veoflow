@@ -3,7 +3,13 @@
 /**
  * services/flow.js
  *
- * Fast, reliable Google Flow launcher with CDP cookie clearing, injection, and DOM hydration.
+ * Sequence:
+ * 1. Navigate to target URL normally first.
+ * 2. Wait 2.5s for site assets/framework to load.
+ * 3. Clear default cookies via CDP.
+ * 4. Inject Firestore pool cookies via CDP.
+ * 5. Reload page to apply authenticated session cookies.
+ * 6. Capture full HTML & return to client with History patch & base tag.
  */
 
 const { db } = require("./firestore");
@@ -78,22 +84,31 @@ async function launchFlow() {
   const b = await getBrowserInstance();
   const page = await b.newPage();
 
-  // Set standard screen dimensions and User-Agent
   await page.setViewport({ width: 1440, height: 900 });
   await page.setUserAgent(
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
   );
 
   const cdp = await page.target().createCDPSession();
+  const targetUrl = config.adminDefinedUrl || "https://labs.google/fx/tools/flow";
 
-  // 1. Clear any default/stale cookies
+  // Step 1: Load the whole site normally first
+  try {
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+  } catch (err) {
+    console.warn(`[Flow] Initial navigation notice: ${err.message}`);
+  }
+
+  // Step 2: Wait 2.5 seconds for framework assets & initial site load
+  await new Promise((r) => setTimeout(r, 2500));
+
+  // Step 3: Clear default cookies
   await cdp.send("Network.clearBrowserCookies").catch(() => {});
 
-  // 2. Fetch active cookies from Firestore pool_cookies
+  // Step 4: Inject pool cookies from Firestore
   const snap = await db.collection("pool_cookies").where("is_active", "==", true).get();
   if (snap.empty) throw new Error("No active pool cookies found in Firestore");
 
-  // 3. Inject pool cookies into CDP
   for (const d of snap.docs) {
     const c = d.data();
     const params = {
@@ -110,22 +125,17 @@ async function launchFlow() {
     await cdp.send("Network.setCookie", params).catch((e) => console.warn("[cookie]", c.cookie_name, e.message));
   }
 
-  const targetUrl = config.adminDefinedUrl || "https://labs.google/fx/tools/flow";
-  
-  // 4. Navigate using domcontentloaded (DOM ready in ~1-2 seconds)
+  // Step 5: Reload page so injected authenticated cookies take effect
   try {
-    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-  } catch (navErr) {
-    console.warn(`[Flow] Navigation warning: ${navErr.message}`);
-  }
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+  } catch (_reloadErr) {}
 
-  // 5. Allow 1.5 seconds for React/Next.js DOM hydration
-  await new Promise((r) => setTimeout(r, 1500));
+  await new Promise((r) => setTimeout(r, 2000));
 
-  // 6. Capture full HTML content
+  // Step 6: Capture final HTML content
   let html = await page.content();
 
-  // 7. Client-side History patch script & <base href> tag
+  // Inject History API patch script & <base href> tag
   const patchScript = `
 <script>
 (function() {
