@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  ui-test-runner:
+    build: .
+    image: ui-test-runner:local
+    container_name: ui-test-runner
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Target URL that every initialized test will navigate to
+      - ADMIN_DEFINED_URL=${ADMIN_DEFINED_URL}
+      # Point to the mounted service-account file (see volumes below)
+      - FIREBASE_CREDENTIALS_PATH=/run/secrets/firebase-sa.json
+      # Optional overrides
+      - FIRESTORE_SESSION_POOL_COLLECTION=${FIRESTORE_SESSION_POOL_COLLECTION:-SessionPool}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - NODE_ENV=production
+    volumes:
+      # Mount the Firebase service-account JSON as a read-only secret volume.
+      # Replace ./secrets/firebase-sa.json with the actual path on the host.
+      - ./secrets/firebase-sa.json:/run/secrets/firebase-sa.json:ro
+    # Chrome inside Docker requires these kernel capabilities.
+    # SYS_ADMIN is needed for the Chrome sandbox when running as root.
+    cap_add:
+      - SYS_ADMIN
+    # Optional: increase shared memory to prevent Chrome renderer crashes
+    shm_size: "256mb"
