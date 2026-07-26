@@ -3,7 +3,7 @@
 /**
  * services/flow.js
  *
- * Fast Google Flow launcher with CDP cookie clearing, cookie injection, and instant commit navigation.
+ * Fast, reliable Google Flow launcher with CDP cookie clearing, injection, and DOM hydration.
  */
 
 const { db } = require("./firestore");
@@ -50,7 +50,7 @@ async function getBrowserInstance() {
   if (browser && browser.isConnected()) return browser;
   
   const executablePath = resolveChromeExecutable();
-  console.info(`[Flow] Launching warm Chrome instance: ${executablePath || "(bundled default)"}`);
+  console.info(`[Flow] Launching Chrome instance: ${executablePath || "(bundled default)"}`);
 
   const launchOptions = {
     headless: "new",
@@ -78,6 +78,7 @@ async function launchFlow() {
   const b = await getBrowserInstance();
   const page = await b.newPage();
 
+  // Set standard screen dimensions and User-Agent
   await page.setViewport({ width: 1440, height: 900 });
   await page.setUserAgent(
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
@@ -85,10 +86,10 @@ async function launchFlow() {
 
   const cdp = await page.target().createCDPSession();
 
-  // 1. Clear any default / leftover cookies
+  // 1. Clear any default/stale cookies
   await cdp.send("Network.clearBrowserCookies").catch(() => {});
 
-  // 2. Retrieve active pool cookies from Firestore
+  // 2. Fetch active cookies from Firestore pool_cookies
   const snap = await db.collection("pool_cookies").where("is_active", "==", true).get();
   if (snap.empty) throw new Error("No active pool cookies found in Firestore");
 
@@ -111,15 +112,20 @@ async function launchFlow() {
 
   const targetUrl = config.adminDefinedUrl || "https://labs.google/fx/tools/flow";
   
-  // 4. Instant navigation: "commit" phase (loads headers instantly without waiting)
-  await page.goto(targetUrl, { waitUntil: "commit", timeout: 15000 }).catch((navErr) => {
-    console.warn(`[Flow] Commit navigation info: ${navErr.message}`);
-  });
+  // 4. Navigate using domcontentloaded (DOM ready in ~1-2 seconds)
+  try {
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+  } catch (navErr) {
+    console.warn(`[Flow] Navigation warning: ${navErr.message}`);
+  }
 
-  // 5. Get HTML content immediately (no artificial delay)
+  // 5. Allow 1.5 seconds for React/Next.js DOM hydration
+  await new Promise((r) => setTimeout(r, 1500));
+
+  // 6. Capture full HTML content
   let html = await page.content();
-  
-  // 6. Inject client-side History patch script & <base href> tag
+
+  // 7. Client-side History patch script & <base href> tag
   const patchScript = `
 <script>
 (function() {
